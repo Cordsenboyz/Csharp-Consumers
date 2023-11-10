@@ -6,7 +6,7 @@ using System.Text;
 
 class Consumer
 {
-    private const string _Messurement = "hehexdtest";
+    private const string _Messurement = "NielsPower";
     static async Task Main(string[] args)
     {
         IConfiguration configuration = new ConfigurationBuilder()
@@ -24,6 +24,8 @@ class Consumer
         {
             Console.WriteLine($"Starting Consumer . . .");
             consumer.Subscribe(topic);
+            List<Data> batchData = new List<Data>();
+
             try
             {
                 while (true)
@@ -32,36 +34,13 @@ class Consumer
 
                     if (cr.Message.Value is not null)
                     {
-
                         Data data = await ParseData(cr.Message.Value);
+                        batchData.Add(data);
 
-                        DateTime dateTime = await UnixToDateTime(data.Timestamp);
-
-                        using (var client = new HttpClient())
+                        if (batchData.Count >= 5000)
                         {
-                            DateTime currentTime = DateTime.UtcNow;
-                            long unixTime = ((DateTimeOffset)dateTime).ToUnixTimeMilliseconds();
-
-                            string payload = $"{_Messurement},house_id={data.HouseId},month={dateTime.Month} value={data.Kwh.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} {unixTime}";
-                            var content = new StringContent(payload, Encoding.UTF8, "application/x-www-form-urlencoded");
-                            bool send = true;
-                            while (send)
-                            {
-                                try
-                                {
-                                    HttpResponseMessage? response = await client.PostAsync("http://172.16.250.15:8428/write", content);
-                                    if (response.IsSuccessStatusCode)
-                                    {
-                                        Console.WriteLine("Sent Data");
-                                        send = false;
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine(ex);
-                                    continue;
-                                }
-                            }
+                            await SendBatchData(batchData);
+                            batchData.Clear();
                         }
                     }
                 }
@@ -72,20 +51,86 @@ class Consumer
             }
             finally
             {
+                if (batchData.Count > 0)
+                {
+                    await SendBatchData(batchData);
+                }
+
                 consumer.Close();
             }
         }
-    }
 
-    static async Task<Data> ParseData(string data)
-    {
-        var parsedData = JsonConvert.DeserializeObject<Data>(data);
-        return parsedData;
-    }
+        static async Task<Data> ParseData(string data)
+        {
+            var parsedData = JsonConvert.DeserializeObject<Data>(data);
+            return parsedData;
+        }
 
-    static async Task<DateTime> UnixToDateTime(int timestamp)
-    {
-        var offset = DateTimeOffset.FromUnixTimeSeconds(timestamp);
-        return offset.UtcDateTime;
+        static async Task<DateTime> UnixToDateTime(int timestamp)
+        {
+            var offset = DateTimeOffset.FromUnixTimeSeconds(timestamp);
+            return offset.UtcDateTime;
+        }
+
+        static async Task SendBatchData(List<Data> batchData)
+        {
+            using (var client = new HttpClient())
+            {
+                List<string> payloads = new List<string>();
+
+                foreach (var data in batchData)
+                {
+                    DateTime dateTime = await UnixToDateTime(data.Timestamp);
+                    long unixTime = ((DateTimeOffset)dateTime).ToUnixTimeMilliseconds();
+                    string season = GetSeason(dateTime);
+
+                    string payload = $"{_Messurement},house_id={data.HouseId},month={dateTime.Month},season={season} value={data.Kwh.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} {unixTime}";
+                    payloads.Add(payload);
+                }
+
+                string combinedPayload = string.Join("\n", payloads);
+
+                var content = new StringContent(combinedPayload, Encoding.UTF8, "application/x-www-form-urlencoded");
+                bool send = true;
+                while (send)
+                {
+                    try
+                    {
+                        HttpResponseMessage? response = await client.PostAsync("http://172.16.250.15:8428/write", content);
+                        if (response.IsSuccessStatusCode)
+                        {
+                            Console.WriteLine("Sent Batch Data");
+                            send = false;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine(ex);
+                        continue;
+                    }
+                }
+            }
+        }
+        static string GetSeason(DateTime date)
+        {
+            int month = date.Month;
+
+            if (month >= 3 && month <= 5)
+            {
+                return "Spring";
+            }
+            else if (month >= 6 && month <= 8)
+            {
+                return "Summer";
+            }
+            else if (month >= 9 && month <= 11)
+            {
+                return "Fall";
+            }
+            else
+            {
+                return "Winter";
+            }
+        }
     }
 }
